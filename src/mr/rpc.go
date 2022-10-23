@@ -23,7 +23,21 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+type AskReply struct {
+	TaskType  int
+	TaskIndex int
+	Files     []string
+	ReduceNum int // indicates task index in reduce.
+}
 
+type MapCommitArgs struct {
+	TaskIndex         int
+	IntermediateFiles []string
+}
+
+type ReduceCommitArgs struct {
+	TaskIndex int
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
