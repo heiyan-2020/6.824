@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -71,6 +72,7 @@ type Raft struct {
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
+	applyCh   chan ApplyMsg
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -220,13 +222,14 @@ func (rf *Raft) resetTimer() {
 	rf.elapseTimeOut = time.Duration(rand.Intn(200)+200) * time.Millisecond
 }
 
-func (rf *Raft) handleFutureTerm(term int) {
+func (rf *Raft) handleFutureTerm(term int) bool {
 	// lock should be held.
 	if term > rf.currentTerm {
 		rf.stepTerm(term)
 		rf.currentState = FOLLOWER
+		return true
 	}
-	return
+	return false
 }
 
 func (rf *Raft) stepTerm(newTerm int) {
@@ -241,7 +244,7 @@ func (rf *Raft) becomeLeader() {
 	rf.currentState = LEADER
 	for i := 0; i < len(rf.peers); i += 1 {
 		rf.nextIndex[i] = len(rf.log)
-		rf.matchIndex[i] = 0
+		rf.matchIndex[i] = -1
 	}
 	rf.sendAppendToAllPeers()
 }
@@ -290,14 +293,38 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	reply.Term = rf.currentTerm
+	reply.Success = true
 	if args.Term < rf.currentTerm {
 		return
 	}
 	rf.handleFutureTerm(args.Term)
-	// TODO: fill in log logic.
 	rf.resetTimer()
-	reply.Success = true
-	reply.Term = rf.currentTerm
+	if args.PrevLogIndex == -1 {
+		// empty
+		return
+	}
+	if args.PrevLogIndex >= len(rf.log) || args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
+		reply.Success = false
+		return
+	}
+	lastNewIndex := args.PrevLogIndex + len(args.NewEntries)
+	appendEntries := args.NewEntries
+	for i := args.PrevLogIndex + 1; i < len(rf.log); i += 1 {
+		if rf.log[i].Term != args.NewEntries[i-args.PrevLogIndex-1].Term {
+			rf.log = rf.log[:i]
+			appendEntries = args.NewEntries[:i-args.PrevLogIndex-1]
+			break
+		}
+	}
+	rf.log = append(rf.log, appendEntries...)
+	if args.LeaderCommit > rf.commitIndex {
+		if args.LeaderCommit <= lastNewIndex {
+			rf.commitIndex = args.LeaderCommit
+		} else {
+			rf.commitIndex = lastNewIndex
+		}
+	}
 	return
 }
 
@@ -386,9 +413,42 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 
-		rf.handleFutureTerm(reply.Term)
 		if reply.Term < rf.currentTerm {
 			return // drop when reply is old.
+		}
+		outDated := rf.handleFutureTerm(reply.Term)
+		if outDated {
+			return // return false because of outdated term, return immediately.
+		}
+		if reply.Success {
+			rf.matchIndex[server] = args.PrevLogIndex + len(args.NewEntries)
+			rf.nextIndex[server] = rf.matchIndex[server] + 1
+			n := rf.matchIndex[server]
+			fmt.Println(n)
+			if n > rf.commitIndex {
+				count := 0
+				for i := 0; i < len(rf.peers); i++ {
+					if rf.matchIndex[i] == n {
+						count++
+					}
+				}
+				if count > len(rf.peers)/2 && rf.log[n].Term == rf.currentTerm {
+					rf.commitIndex = n
+					// send back each newly committed entry
+					for i := 0; i < len(rf.peers); i++ {
+						fmt.Println("send back")
+						if rf.matchIndex[i] == n {
+							rf.applyCh <- ApplyMsg{
+								CommandValid: true,
+								Command:      rf.log[n].Command,
+								CommandIndex: n,
+							}
+						}
+					}
+				}
+			}
+		} else {
+			rf.nextIndex[server] -= 1
 		}
 	}
 	return
@@ -399,21 +459,31 @@ func (rf *Raft) sendAppendToAllPeers() {
 	copyPeer := make([]*labrpc.ClientEnd, len(rf.peers))
 	copy(copyPeer, rf.peers)
 	copyTerm := rf.currentTerm
-	copyPrevLogIndex := -1
-	copyPrevLogTerm := -1
 	copyEntries := make([]LogEntry, len(rf.log))
 	copy(copyEntries, rf.log)
 	copyLeaderCommit := rf.commitIndex
+	copyNextIndex := make([]int, len(rf.nextIndex))
+	copy(copyNextIndex, rf.nextIndex)
+	copyMatchIndex := make([]int, len(rf.matchIndex))
+	copy(copyMatchIndex, rf.matchIndex)
 
 	for i := 0; i < len(copyPeer); i += 1 {
 		if i != rf.me {
+			prevIndex := copyNextIndex[i] - 1
+			prevLogTerm := -1
+			if prevIndex != -1 {
+				prevLogTerm = copyEntries[prevIndex].Term
+			}
 			args := AppendEntriesArgs{
 				Term:         copyTerm,
 				LeaderId:     rf.me,
-				PrevLogIndex: copyPrevLogIndex,
-				PrevLogTerm:  copyPrevLogTerm,
+				PrevLogIndex: prevIndex,
+				PrevLogTerm:  prevLogTerm,
 				NewEntries:   copyEntries,
 				LeaderCommit: copyLeaderCommit,
+			}
+			if len(copyEntries) > copyNextIndex[i] {
+				args.NewEntries = copyEntries[copyNextIndex[i]:]
 			}
 			go rf.sendAppendEntries(i, &args)
 		}
@@ -436,9 +506,17 @@ func (rf *Raft) sendAppendToAllPeers() {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.mu.Lock()
+	isLeader := rf.currentState == LEADER
 	index := -1
 	term := -1
-	isLeader := true
+	if isLeader {
+		rf.log = append(rf.log, LogEntry{command, rf.currentTerm})
+		index = len(rf.log) - 1
+		term = rf.currentTerm
+		isLeader = rf.currentState == LEADER
+	}
+	rf.mu.Unlock()
 
 	// Your code here (2B).
 
