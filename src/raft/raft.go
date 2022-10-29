@@ -361,24 +361,24 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) {
 
 func (rf *Raft) sendRequestToAllPeers() {
 	rf.mu.Lock()
-	snapshot := make([]*labrpc.ClientEnd, len(rf.peers))
-	copy(snapshot, rf.peers)
+	CopyPeers := make([]*labrpc.ClientEnd, len(rf.peers))
+	copy(CopyPeers, rf.peers)
+	copyTerm := rf.currentTerm
+	copyLastLogIndex := len(rf.log) - 1
+	copyLastLogTerm := -1
+	if len(rf.log) > 0 {
+		copyLastLogTerm = rf.log[len(rf.log)-1].Term
+	}
 	rf.mu.Unlock()
 
-	for i := 0; i < len(snapshot); i += 1 {
+	for i := 0; i < len(CopyPeers); i += 1 {
 		if i != rf.me {
-			rf.mu.Lock()
-			lastTerm := -1
-			if len(rf.log) > 0 {
-				lastTerm = rf.log[len(rf.log)-1].Term
-			}
 			args := RequestVoteArgs{
-				Term:         rf.currentTerm,
+				Term:         copyTerm,
 				CandidateId:  rf.me,
-				LastLogIndex: len(rf.log) - 1,
-				LastLogTerm:  lastTerm,
+				LastLogIndex: copyLastLogIndex,
+				LastLogTerm:  copyLastLogTerm,
 			}
-			rf.mu.Unlock()
 			go rf.sendRequestVote(i, &args)
 		}
 	}
@@ -402,26 +402,26 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 
 func (rf *Raft) sendAppendToAllPeers() {
 	rf.mu.Lock()
-	snapshot := make([]*labrpc.ClientEnd, len(rf.peers))
-	copy(snapshot, rf.peers)
+	copyPeer := make([]*labrpc.ClientEnd, len(rf.peers))
+	copy(copyPeer, rf.peers)
+	copyTerm := rf.currentTerm
+	copyPrevLogIndex := -1
+	copyPrevLogTerm := -1
+	copyEntries := make([]LogEntry, len(rf.log))
+	copy(copyEntries, rf.log)
+	copyLeaderCommit := rf.commitIndex
 	rf.mu.Unlock()
 
-	for i := 0; i < len(snapshot); i += 1 {
+	for i := 0; i < len(copyPeer); i += 1 {
 		if i != rf.me {
-			rf.mu.Lock()
-			if rf.currentState != LEADER {
-				rf.mu.Unlock()
-				break
-			}
 			args := AppendEntriesArgs{
-				Term:         rf.currentTerm,
+				Term:         copyTerm,
 				LeaderId:     rf.me,
-				PrevLogIndex: -1,
-				PrevLogTerm:  -1,
-				NewEntries:   rf.log,
-				LeaderCommit: -1,
+				PrevLogIndex: copyPrevLogIndex,
+				PrevLogTerm:  copyPrevLogTerm,
+				NewEntries:   copyEntries,
+				LeaderCommit: copyLeaderCommit,
 			}
-			rf.mu.Unlock()
 			go rf.sendAppendEntries(i, &args)
 		}
 	}
