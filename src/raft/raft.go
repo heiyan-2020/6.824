@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -270,7 +269,7 @@ func (rf *Raft) checkApply() {
 		rf.applyCh <- ApplyMsg{
 			CommandValid:  true,
 			Command:       rf.log[rf.lastApplied].Command,
-			CommandIndex:  rf.lastApplied,
+			CommandIndex:  rf.lastApplied + 1,
 			SnapshotValid: false,
 			Snapshot:      nil,
 			SnapshotTerm:  0,
@@ -307,7 +306,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	fmt.Println(args, rf.me, rf.currentState, rf.commitIndex)
 	reply.Term = rf.currentTerm
 	reply.Success = true
 	if args.Term < rf.currentTerm {
@@ -516,7 +514,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	if isLeader {
 		rf.log = append(rf.log, LogEntry{command, rf.currentTerm})
-		index = len(rf.log) - 1
+		index = len(rf.log)
 		term = rf.currentTerm
 		isLeader = rf.currentState == LEADER
 	}
