@@ -264,6 +264,21 @@ func (rf *Raft) activateElection() {
 	rf.sendRequestToAllPeers()
 }
 
+func (rf *Raft) checkApply() {
+	if rf.commitIndex > rf.lastApplied {
+		rf.lastApplied++
+		rf.applyCh <- ApplyMsg{
+			CommandValid:  true,
+			Command:       rf.log[rf.lastApplied].Command,
+			CommandIndex:  rf.lastApplied,
+			SnapshotValid: false,
+			Snapshot:      nil,
+			SnapshotTerm:  0,
+			SnapshotIndex: 0,
+		}
+	}
+}
+
 //
 // example RequestVote RPC handler.
 //
@@ -434,16 +449,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 				if count > len(rf.peers)/2 && rf.log[n].Term == rf.currentTerm {
 					rf.commitIndex = n
 					// send back each newly committed entry
-					for i := 0; i < len(rf.peers); i++ {
-						if rf.matchIndex[i] == n {
-							fmt.Println("send back")
-							rf.applyCh <- ApplyMsg{
-								CommandValid: true,
-								Command:      rf.log[n].Command,
-								CommandIndex: n,
-							}
-						}
-					}
 				}
 			}
 		} else {
@@ -576,6 +581,7 @@ func (rf *Raft) beater() {
 		if rf.currentState == LEADER {
 			rf.sendAppendToAllPeers()
 		}
+		rf.checkApply()
 		rf.mu.Unlock()
 		time.Sleep(110 * time.Millisecond)
 	}
@@ -604,6 +610,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.commitIndex = -1
+	rf.lastApplied = -1
 	rf.applyCh = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
