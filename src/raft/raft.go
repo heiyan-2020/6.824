@@ -292,7 +292,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
+	fmt.Println(args, rf.me, rf.currentState, rf.commitIndex)
 	reply.Term = rf.currentTerm
 	reply.Success = true
 	if args.Term < rf.currentTerm {
@@ -300,11 +300,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.handleFutureTerm(args.Term)
 	rf.resetTimer()
-	if args.PrevLogIndex == -1 {
-		// empty
-		return
-	}
-	if args.PrevLogIndex >= len(rf.log) || args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
+	//if args.PrevLogIndex == -1 {
+	//	// empty
+	//	return
+	//}
+	if args.PrevLogIndex >= len(rf.log) || (args.PrevLogIndex != -1 && args.PrevLogTerm != rf.log[args.PrevLogIndex].Term) {
 		reply.Success = false
 		return
 	}
@@ -424,7 +424,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 			rf.matchIndex[server] = args.PrevLogIndex + len(args.NewEntries)
 			rf.nextIndex[server] = rf.matchIndex[server] + 1
 			n := rf.matchIndex[server]
-			fmt.Println(n)
 			if n > rf.commitIndex {
 				count := 0
 				for i := 0; i < len(rf.peers); i++ {
@@ -436,8 +435,8 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 					rf.commitIndex = n
 					// send back each newly committed entry
 					for i := 0; i < len(rf.peers); i++ {
-						fmt.Println("send back")
 						if rf.matchIndex[i] == n {
+							fmt.Println("send back")
 							rf.applyCh <- ApplyMsg{
 								CommandValid: true,
 								Command:      rf.log[n].Command,
@@ -479,7 +478,7 @@ func (rf *Raft) sendAppendToAllPeers() {
 				LeaderId:     rf.me,
 				PrevLogIndex: prevIndex,
 				PrevLogTerm:  prevLogTerm,
-				NewEntries:   copyEntries,
+				NewEntries:   make([]LogEntry, 0),
 				LeaderCommit: copyLeaderCommit,
 			}
 			if len(copyEntries) > copyNextIndex[i] {
@@ -604,6 +603,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.resetTimer()
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
+	rf.commitIndex = -1
+	rf.applyCh = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
 
