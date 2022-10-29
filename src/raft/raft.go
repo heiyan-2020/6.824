@@ -243,16 +243,13 @@ func (rf *Raft) becomeLeader() {
 		rf.nextIndex[i] = len(rf.log)
 		rf.matchIndex[i] = 0
 	}
-	rf.mu.Unlock()
 	rf.sendAppendToAllPeers()
-	rf.mu.Lock()
 }
 
 func (rf *Raft) becomeCandidate() {
 	// lock should be held.
 	rf.currentState = CANDIDATE
 	rf.stepTerm(rf.currentTerm + 1)
-
 }
 
 func (rf *Raft) activateElection() {
@@ -261,9 +258,7 @@ func (rf *Raft) activateElection() {
 	rf.votedFor = rf.me
 	rf.currentVotes = 1
 	rf.resetTimer()
-	rf.mu.Unlock()
 	rf.sendRequestToAllPeers()
-	rf.mu.Lock()
 }
 
 //
@@ -360,7 +355,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) {
 }
 
 func (rf *Raft) sendRequestToAllPeers() {
-	rf.mu.Lock()
+	// lock held
 	CopyPeers := make([]*labrpc.ClientEnd, len(rf.peers))
 	copy(CopyPeers, rf.peers)
 	copyTerm := rf.currentTerm
@@ -369,7 +364,6 @@ func (rf *Raft) sendRequestToAllPeers() {
 	if len(rf.log) > 0 {
 		copyLastLogTerm = rf.log[len(rf.log)-1].Term
 	}
-	rf.mu.Unlock()
 
 	for i := 0; i < len(CopyPeers); i += 1 {
 		if i != rf.me {
@@ -401,7 +395,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 }
 
 func (rf *Raft) sendAppendToAllPeers() {
-	rf.mu.Lock()
+	// lock held
 	copyPeer := make([]*labrpc.ClientEnd, len(rf.peers))
 	copy(copyPeer, rf.peers)
 	copyTerm := rf.currentTerm
@@ -410,7 +404,6 @@ func (rf *Raft) sendAppendToAllPeers() {
 	copyEntries := make([]LogEntry, len(rf.log))
 	copy(copyEntries, rf.log)
 	copyLeaderCommit := rf.commitIndex
-	rf.mu.Unlock()
 
 	for i := 0; i < len(copyPeer); i += 1 {
 		if i != rf.me {
@@ -503,14 +496,10 @@ func (rf *Raft) beater() {
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 		rf.mu.Lock()
-		state := rf.currentState
-		rf.mu.Unlock()
-		// Thinking: whether we need to keep sendAppend and checkState in same critical section?
-		// in other words, do we need to keep state==leader when sending append?
-		//
-		if state == LEADER {
+		if rf.currentState == LEADER {
 			rf.sendAppendToAllPeers()
 		}
+		rf.mu.Unlock()
 		time.Sleep(110 * time.Millisecond)
 	}
 }
