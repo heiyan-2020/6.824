@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -202,14 +203,14 @@ type AppendEntriesReply struct {
 func compareLog(self []LogEntry, candidateLastTerm int, candidateLastIndex int) bool {
 	if len(self) == 0 {
 		return true
-	} else if candidateLastIndex == 0 {
+	} else if candidateLastIndex == -1 {
 		return false
 	}
 
 	selfLastTerm := self[len(self)-1].Term
 	if candidateLastTerm > selfLastTerm {
 		return true
-	} else if candidateLastTerm == selfLastTerm && candidateLastIndex >= len(self) {
+	} else if candidateLastTerm == selfLastTerm && candidateLastIndex >= len(self)-1 {
 		return true
 	}
 	return false
@@ -245,6 +246,8 @@ func (rf *Raft) becomeLeader() {
 		rf.nextIndex[i] = len(rf.log)
 		rf.matchIndex[i] = -1
 	}
+	fmt.Printf("%v is the leader of term %v\n", rf.me, rf.currentTerm)
+	fmt.Println(rf.log)
 	rf.sendAppendToAllPeers()
 }
 
@@ -266,6 +269,7 @@ func (rf *Raft) activateElection() {
 func (rf *Raft) checkApply() {
 	if rf.commitIndex > rf.lastApplied {
 		rf.lastApplied++
+		fmt.Printf("%v has applied %v\n", rf.me, rf.lastApplied)
 		rf.applyCh <- ApplyMsg{
 			CommandValid:  true,
 			Command:       rf.log[rf.lastApplied].Command,
@@ -323,7 +327,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	lastNewIndex := args.PrevLogIndex + len(args.NewEntries)
 	appendEntries := args.NewEntries
-	for i := args.PrevLogIndex + 1; i < len(rf.log); i += 1 {
+	for i := args.PrevLogIndex + 1; i < len(rf.log) && i-args.PrevLogIndex-1 < len(args.NewEntries); i += 1 {
 		if rf.log[i].Term != args.NewEntries[i-args.PrevLogIndex-1].Term {
 			rf.log = rf.log[:i]
 			appendEntries = args.NewEntries[:i-args.PrevLogIndex-1]
@@ -331,6 +335,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 	rf.log = append(rf.log, appendEntries...)
+	fmt.Println(rf.log, args.NewEntries, appendEntries)
 	if args.LeaderCommit > rf.commitIndex {
 		if args.LeaderCommit <= lastNewIndex {
 			rf.commitIndex = args.LeaderCommit
@@ -401,6 +406,9 @@ func (rf *Raft) sendRequestToAllPeers() {
 	copyTerm := rf.currentTerm
 	copyLastLogIndex := len(rf.log) - 1
 	copyLastLogTerm := -1
+	if copyLastLogIndex != -1 {
+		copyLastLogTerm = rf.log[copyLastLogIndex].Term
+	}
 	if len(rf.log) > 0 {
 		copyLastLogTerm = rf.log[len(rf.log)-1].Term
 	}
@@ -440,13 +448,12 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 			if n > rf.commitIndex {
 				count := 0
 				for i := 0; i < len(rf.peers); i++ {
-					if rf.matchIndex[i] == n {
+					if rf.matchIndex[i] >= n {
 						count++
 					}
 				}
-				if count > len(rf.peers)/2 && rf.log[n].Term == rf.currentTerm {
+				if count >= len(rf.peers)/2 && rf.log[n].Term == rf.currentTerm {
 					rf.commitIndex = n
-					// send back each newly committed entry
 				}
 			}
 		} else {
@@ -555,7 +562,7 @@ func (rf *Raft) ticker() {
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 		rf.mu.Lock()
-		if time.Now().Sub(rf.lastTimeHeartBeat) > rf.elapseTimeOut {
+		if time.Now().Sub(rf.lastTimeHeartBeat) > rf.elapseTimeOut && rf.currentState != LEADER {
 			switch rf.currentState {
 			case FOLLOWER:
 				rf.activateElection()
