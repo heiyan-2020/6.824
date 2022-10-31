@@ -575,6 +575,7 @@ func (rf *Raft) ticker() {
 				rf.activateElection()
 			}
 		}
+		rf.checkApply()
 		rf.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -591,9 +592,8 @@ func (rf *Raft) beater() {
 		if rf.currentState == LEADER {
 			rf.sendAppendToAllPeers()
 		}
-		rf.checkApply()
 		rf.mu.Unlock()
-		time.Sleep(110 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
