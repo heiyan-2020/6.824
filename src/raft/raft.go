@@ -266,7 +266,7 @@ func (rf *Raft) activateElection() {
 }
 
 func (rf *Raft) checkApply() {
-	if rf.commitIndex > rf.lastApplied {
+	for rf.commitIndex > rf.lastApplied {
 		rf.lastApplied++
 		//fmt.Printf("%v has applied [index: %v, term: %v, command: %v]\n", rf.me, rf.lastApplied+1, rf.log[rf.lastApplied].Term, rf.log[rf.lastApplied].Command)
 		rf.applyCh <- ApplyMsg{
@@ -523,7 +523,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := rf.currentState == LEADER
 	index := -1
 	term := -1
-	//fmt.Printf("start: %v: term=%v, log=%v, command=%v\n", rf.me, rf.currentTerm, rf.log, command)
+	//fmt.Printf("start: %v: term=%v, command=%v\n", rf.me, rf.currentTerm, command)
 	if isLeader {
 		rf.log = append(rf.log, LogEntry{command, rf.currentTerm})
 		index = len(rf.log)
