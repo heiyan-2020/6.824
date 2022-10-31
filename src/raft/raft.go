@@ -330,12 +330,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for i := args.PrevLogIndex + 1; i < len(rf.log) && i-args.PrevLogIndex-1 < len(args.NewEntries); i += 1 {
 		if rf.log[i].Term != args.NewEntries[i-args.PrevLogIndex-1].Term {
 			rf.log = rf.log[:i]
-			appendEntries = args.NewEntries[:i-args.PrevLogIndex-1]
+			appendEntries = args.NewEntries[i-args.PrevLogIndex-1:]
 			break
 		}
 	}
 	rf.log = append(rf.log, appendEntries...)
-	fmt.Println(rf.log, args.NewEntries, appendEntries)
 	if args.LeaderCommit > rf.commitIndex {
 		if args.LeaderCommit <= lastNewIndex {
 			rf.commitIndex = args.LeaderCommit
