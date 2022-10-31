@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -246,8 +245,8 @@ func (rf *Raft) becomeLeader() {
 		rf.nextIndex[i] = len(rf.log)
 		rf.matchIndex[i] = -1
 	}
-	fmt.Printf("%v is the leader of term %v\n", rf.me, rf.currentTerm)
-	fmt.Println(rf.log)
+	//fmt.Printf("%v is the leader of term %v, Leader log is:", rf.me, rf.currentTerm)
+	//fmt.Println(rf.log)
 	rf.sendAppendToAllPeers()
 }
 
@@ -269,7 +268,7 @@ func (rf *Raft) activateElection() {
 func (rf *Raft) checkApply() {
 	if rf.commitIndex > rf.lastApplied {
 		rf.lastApplied++
-		fmt.Printf("%v has applied %v\n", rf.me, rf.lastApplied)
+		//fmt.Printf("%v has applied [index: %v, term: %v, command: %v]\n", rf.me, rf.lastApplied+1, rf.log[rf.lastApplied].Term, rf.log[rf.lastApplied].Command)
 		rf.applyCh <- ApplyMsg{
 			CommandValid:  true,
 			Command:       rf.log[rf.lastApplied].Command,
@@ -310,6 +309,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 	reply.Term = rf.currentTerm
 	reply.Success = true
 	if args.Term < rf.currentTerm {
@@ -323,6 +323,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//}
 	if args.PrevLogIndex >= len(rf.log) || (args.PrevLogIndex != -1 && args.PrevLogTerm != rf.log[args.PrevLogIndex].Term) {
 		reply.Success = false
+		//fmt.Printf("%v:return false, log=%v, args=%v, prevIndex=%v, prevTerm=%v\n", rf.me, rf.log, args.NewEntries, args.PrevLogIndex, args.PrevLogTerm)
 		return
 	}
 	lastNewIndex := args.PrevLogIndex + len(args.NewEntries)
@@ -334,7 +335,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			break
 		}
 	}
+	//fmt.Printf("%v:Before append, log=%v, appendEntries=%v, args=%v, prevIndex=%v, prevTerm=%v\n", rf.me, rf.log, appendEntries, args.NewEntries, args.PrevLogIndex, args.PrevLogTerm)
 	rf.log = append(rf.log, appendEntries...)
+	//fmt.Printf("%v:After append, log=%v\n", rf.me, rf.log)
 	if args.LeaderCommit > rf.commitIndex {
 		if args.LeaderCommit <= lastNewIndex {
 			rf.commitIndex = args.LeaderCommit
@@ -429,11 +432,12 @@ func (rf *Raft) sendRequestToAllPeers() {
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 	reply := AppendEntriesReply{}
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, &reply)
+	oldTerm := args.Term
 	if ok {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 
-		if reply.Term < rf.currentTerm {
+		if oldTerm < rf.currentTerm {
 			return // drop when reply is old.
 		}
 		outDated := rf.handleFutureTerm(reply.Term)
@@ -442,6 +446,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 		}
 		if reply.Success {
 			rf.matchIndex[server] = args.PrevLogIndex + len(args.NewEntries)
+			//fmt.Println(server, args)
 			rf.nextIndex[server] = rf.matchIndex[server] + 1
 			n := rf.matchIndex[server]
 			if n > rf.commitIndex {
@@ -518,6 +523,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := rf.currentState == LEADER
 	index := -1
 	term := -1
+	//fmt.Printf("start: %v: term=%v, log=%v, command=%v\n", rf.me, rf.currentTerm, rf.log, command)
 	if isLeader {
 		rf.log = append(rf.log, LogEntry{command, rf.currentTerm})
 		index = len(rf.log)
