@@ -317,10 +317,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.handleFutureTerm(args.Term)
 	rf.resetTimer()
-	//if args.PrevLogIndex == -1 {
-	//	// empty
-	//	return
-	//}
 	if args.PrevLogIndex >= len(rf.log) || (args.PrevLogIndex != -1 && args.PrevLogTerm != rf.log[args.PrevLogIndex].Term) {
 		reply.Success = false
 		//fmt.Printf("%v:return false, log=%v, args=%v, prevIndex=%v, prevTerm=%v\n", rf.me, rf.log, args.NewEntries, args.PrevLogIndex, args.PrevLogTerm)
@@ -432,12 +428,11 @@ func (rf *Raft) sendRequestToAllPeers() {
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 	reply := AppendEntriesReply{}
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, &reply)
-	oldTerm := args.Term
 	if ok {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 
-		if oldTerm < rf.currentTerm {
+		if args.Term < rf.currentTerm {
 			return // drop when reply is old.
 		}
 		outDated := rf.handleFutureTerm(reply.Term)
@@ -567,6 +562,7 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 		rf.mu.Lock()
 		if time.Now().Sub(rf.lastTimeHeartBeat) > rf.elapseTimeOut {
+			Debug(dTimer, "S%d Leader, checking heartbeats", rf.me)
 			switch rf.currentState {
 			case FOLLOWER:
 				rf.activateElection()
