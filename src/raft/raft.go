@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"6.824/labgob"
+	"bytes"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -112,12 +114,15 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	// lock held.
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	Debug(dPersist, "S%v persists", rf.me)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -127,19 +132,25 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var term int
+	var voteFor int
+	var logs []LogEntry
+	if d.Decode(&term) != nil ||
+		d.Decode(&voteFor) != nil ||
+		d.Decode(&logs) != nil {
+		Debug(dWarn, "S%v Decode failed.", rf.me)
+	} else {
+		rf.currentTerm = term
+		rf.votedFor = voteFor
+		rf.log = logs
+		Debug(dPersist, "S%v reads from persistent state, term=%v, voted=%v, log=%v.", rf.me, rf.currentTerm, rf.votedFor, rf.log)
+	}
 }
 
 //
@@ -239,6 +250,7 @@ func (rf *Raft) stepTerm(newTerm int) {
 	rf.currentTerm = newTerm
 	rf.votedFor = -1
 	rf.currentVotes = 0
+	rf.persist()
 }
 
 func (rf *Raft) becomeLeader() {
@@ -248,8 +260,7 @@ func (rf *Raft) becomeLeader() {
 		rf.nextIndex[i] = len(rf.log)
 		rf.matchIndex[i] = -1
 	}
-	//fmt.Printf("%v is the leader of term %v, Leader log is:", rf.me, rf.currentTerm)
-	//fmt.Println(rf.log)
+	Debug(dLeader, "S%v becomes leader of Term:%v", rf.me, rf.currentTerm)
 	rf.sendAppendToAllPeers()
 }
 
@@ -263,6 +274,7 @@ func (rf *Raft) activateElection() {
 	// lock should be held.
 	rf.becomeCandidate()
 	rf.votedFor = rf.me
+	rf.persist()
 	rf.currentVotes = 1
 	rf.resetTimer()
 	rf.sendRequestToAllPeers()
@@ -271,7 +283,7 @@ func (rf *Raft) activateElection() {
 func (rf *Raft) checkApply() {
 	for rf.commitIndex > rf.lastApplied {
 		rf.lastApplied++
-		//fmt.Printf("%v has applied [index: %v, term: %v, command: %v]\n", rf.me, rf.lastApplied+1, rf.log[rf.lastApplied].Term, rf.log[rf.lastApplied].Command)
+		//Debug(dClient, "S%v apply [%v] at [%v], log=%v", rf.me, rf.log[rf.lastApplied].Command, rf.lastApplied+1, rf.log)
 		rf.applyCh <- ApplyMsg{
 			CommandValid:  true,
 			Command:       rf.log[rf.lastApplied].Command,
@@ -303,7 +315,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && compareLog(rf.log, args.LastLogTerm, args.LastLogIndex) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
+		rf.persist()
+		Debug(dPersist, "S%v persist when voting", rf.me)
 		rf.resetTimer()
+		Debug(dTimer, "S%v reset timer for granting vote", rf.me)
 		return
 	}
 	return
@@ -344,14 +359,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			appendEntries = args.NewEntries[i-args.PrevLogIndex-1:]
 			break
 		}
+		appendEntries = args.NewEntries[i-args.PrevLogIndex:]
 	}
+	Debug(dLog, "S%v append log at %v from S%v: %v.", rf.me, args.PrevLogIndex+1, args.LeaderId, appendEntries)
 	rf.log = append(rf.log, appendEntries...)
+	rf.persist()
 	if args.LeaderCommit > rf.commitIndex {
 		if args.LeaderCommit <= lastNewIndex {
 			rf.commitIndex = args.LeaderCommit
 		} else {
 			rf.commitIndex = lastNewIndex
 		}
+		Debug(dCommit, "S%v commitIndex = %v", rf.me, rf.commitIndex)
 	}
 	return
 }
@@ -399,6 +418,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) {
 		// drop when I'm not candidate anymore.
 		if rf.currentState == CANDIDATE {
 			if reply.VoteGranted {
+				Debug(dVote, "S%v <- S%v votes", rf.me, server)
 				rf.currentVotes += 1
 			}
 			if rf.currentVotes > len(rf.peers)/2 {
@@ -439,6 +459,7 @@ func (rf *Raft) sendRequestToAllPeers() {
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 	reply := AppendEntriesReply{}
+	Debug(dLog2, "S%v send %v to %v.", rf.me, args.NewEntries, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, &reply)
 	if ok {
 		rf.mu.Lock()
@@ -471,7 +492,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 			/* take advantage of returned information */
 			if reply.XTerm == -1 {
 				rf.nextIndex[server] = reply.XLen
-				
+
 			} else {
 				i := args.PrevLogIndex // i won't be -1 because PrevLogIndex == -1 will always return true.
 				for ; i >= 0 && rf.log[i].Term != reply.XTerm; i-- {
@@ -547,6 +568,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	//fmt.Printf("start: %v: term=%v, command=%v\n", rf.me, rf.currentTerm, command)
 	if isLeader {
 		rf.log = append(rf.log, LogEntry{command, rf.currentTerm})
+		rf.persist()
 		index = len(rf.log)
 		term = rf.currentTerm
 		isLeader = rf.currentState == LEADER
@@ -610,6 +632,7 @@ func (rf *Raft) beater() {
 		// time.Sleep().
 		rf.mu.Lock()
 		if rf.currentState == LEADER {
+			Debug(dLeader, "S%v sends heartbeat", rf.me)
 			rf.sendAppendToAllPeers()
 		}
 		rf.mu.Unlock()
@@ -643,6 +666,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = -1
 	rf.applyCh = applyCh
 
+	Debug(dClient, "S%v starts", rf.me)
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
