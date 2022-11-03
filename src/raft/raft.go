@@ -196,6 +196,9 @@ type RequestVoteReply struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+	XTerm   int
+	XIndex  int
+	XLen    int
 }
 
 // return true when candidate's log is more or equally up-to-date than self's.
@@ -312,6 +315,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Term = rf.currentTerm
 	reply.Success = true
+	reply.XTerm = -1
+	reply.XIndex = -1
+	reply.XLen = len(rf.log)
 	if args.Term < rf.currentTerm {
 		return
 	}
@@ -319,7 +325,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.resetTimer()
 	if args.PrevLogIndex >= len(rf.log) || (args.PrevLogIndex != -1 && args.PrevLogTerm != rf.log[args.PrevLogIndex].Term) {
 		reply.Success = false
-		//fmt.Printf("%v:return false, log=%v, args=%v, prevIndex=%v, prevTerm=%v\n", rf.me, rf.log, args.NewEntries, args.PrevLogIndex, args.PrevLogTerm)
+		/*	return more information for fast backing up	*/
+		if args.PrevLogIndex != -1 && args.PrevLogIndex < len(rf.log) {
+			reply.XTerm = rf.log[args.PrevLogIndex].Term
+			i := args.PrevLogIndex
+			for ; i >= 0 && rf.log[i].Term == reply.XTerm; i-- {
+			}
+			reply.XIndex = i
+			Debug(dInfo, "S%v <- S%v Append failed.\n", rf.me, args.LeaderId)
+		}
 		return
 	}
 	lastNewIndex := args.PrevLogIndex + len(args.NewEntries)
@@ -331,9 +345,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			break
 		}
 	}
-	//fmt.Printf("%v:Before append, log=%v, appendEntries=%v, args=%v, prevIndex=%v, prevTerm=%v\n", rf.me, rf.log, appendEntries, args.NewEntries, args.PrevLogIndex, args.PrevLogTerm)
 	rf.log = append(rf.log, appendEntries...)
-	//fmt.Printf("%v:After append, log=%v\n", rf.me, rf.log)
 	if args.LeaderCommit > rf.commitIndex {
 		if args.LeaderCommit <= lastNewIndex {
 			rf.commitIndex = args.LeaderCommit
@@ -456,7 +468,21 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 				}
 			}
 		} else {
-			rf.nextIndex[server] -= 1
+			/* take advantage of returned information */
+			if reply.XTerm == -1 {
+				rf.nextIndex[server] = reply.XLen
+				
+			} else {
+				i := args.PrevLogIndex // i won't be -1 because PrevLogIndex == -1 will always return true.
+				for ; i >= 0 && rf.log[i].Term != reply.XTerm; i-- {
+				}
+				if i == -1 {
+					// XTerm is not in log.
+					rf.nextIndex[server] = reply.XIndex
+				} else {
+					rf.nextIndex[server] = i + 1
+				}
+			}
 		}
 	}
 	return
@@ -562,7 +588,6 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 		rf.mu.Lock()
 		if time.Now().Sub(rf.lastTimeHeartBeat) > rf.elapseTimeOut {
-			Debug(dTimer, "S%d Leader, checking heartbeats", rf.me)
 			switch rf.currentState {
 			case FOLLOWER:
 				rf.activateElection()
