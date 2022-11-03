@@ -562,12 +562,11 @@ func (rf *Raft) killed() bool {
 // heartsbeats recently.
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 		rf.mu.Lock()
-		if time.Now().Sub(rf.lastTimeHeartBeat) > rf.elapseTimeOut && rf.currentState != LEADER {
+		if time.Now().Sub(rf.lastTimeHeartBeat) > rf.elapseTimeOut {
 			switch rf.currentState {
 			case FOLLOWER:
 				rf.activateElection()
