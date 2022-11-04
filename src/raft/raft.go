@@ -104,10 +104,10 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
-	rf.mu.Lock()
+	rf.acquire("GetState")
+	defer rf.release("GetState")
 	isleader = rf.currentState == LEADER
 	term = rf.currentTerm
-	rf.mu.Unlock()
 	return term, isleader
 }
 
@@ -125,23 +125,22 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
-	e.Encode(rf.snapShot)
 	e.Encode(rf.lastIncludedIndex)
 	e.Encode(rf.lastIncludedTerm)
 	Debug(dPersist, "S%v persists", rf.me)
 	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	rf.persister.SaveStateAndSnapshot(data, rf.snapShot)
 }
 
 //
 // restore previously persisted state.
 //
-func (rf *Raft) readPersist(data []byte) {
+func (rf *Raft) readPersist(data []byte, snapShot []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.acquire("readPersist")
+	defer rf.release("readPersist")
 	// Your code here (2C).
 	// Example:
 	r := bytes.NewBuffer(data)
@@ -149,13 +148,11 @@ func (rf *Raft) readPersist(data []byte) {
 	var term int
 	var voteFor int
 	var logs []LogEntry
-	var snapShot []byte
 	var lastIndex int
 	var lastTerm int
 	if d.Decode(&term) != nil ||
 		d.Decode(&voteFor) != nil ||
 		d.Decode(&logs) != nil ||
-		d.Decode(&snapShot) != nil ||
 		d.Decode(&lastIndex) != nil ||
 		d.Decode(&lastTerm) != nil {
 		Debug(dWarn, "S%v Decode failed.", rf.me)
@@ -187,16 +184,17 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.acquire("Snapshot")
+	defer rf.release("Snapshot")
 
 	// get actual index in advance to avoid overriding of lastIncludedIndex
+	index -= 1
 	actualIndex := rf.getActualIndex(index)
 
 	// install new snapShot
 	rf.snapShot = snapshot
 	rf.lastIncludedIndex = index
-	rf.lastIncludedTerm = rf.log[rf.getActualIndex(index)].Term
+	rf.lastIncludedTerm = rf.log[actualIndex].Term
 	Debug(dSnap, "S%v has installed snapShot of [lastIndex=%v lastTerm=%v]", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm)
 
 	// trim log
@@ -272,6 +270,17 @@ func (rf *Raft) resetTimer() {
 	rf.elapseTimeOut = time.Duration(rand.Intn(200)+200) * time.Millisecond
 }
 
+func (rf *Raft) acquire(funcName string) {
+	//Debug(dLock, "S%v acquire lock from %v", rf.me, funcName)
+	rf.mu.Lock()
+	//Debug(dLock, "S%v acquired", rf.me)
+}
+
+func (rf *Raft) release(funcName string) {
+	//Debug(dInfo, "S%v release lock from %v", rf.me, funcName)
+	rf.mu.Unlock()
+}
+
 func (rf *Raft) handleFutureTerm(term int) bool {
 	// lock should be held.
 	if term > rf.currentTerm {
@@ -322,6 +331,7 @@ func (rf *Raft) becomeCandidate() {
 
 func (rf *Raft) activateElection() {
 	// lock should be held.
+	Debug(dLeader, "S%v wants to become leader", rf.me)
 	rf.becomeCandidate()
 	rf.votedFor = rf.me
 	rf.persist()
@@ -330,30 +340,32 @@ func (rf *Raft) activateElection() {
 	rf.sendRequestToAllPeers()
 }
 
-func (rf *Raft) checkApply() {
-	for rf.commitIndex > rf.lastApplied {
-		rf.lastApplied++
-		actualIndex := rf.getActualIndex(rf.lastApplied)
-		Debug(dClient, "S%v apply [%v] at [%v], log=%v", rf.me, rf.log[actualIndex].Command, rf.lastApplied+1, rf.log)
-		rf.applyCh <- ApplyMsg{
-			CommandValid:  true,
-			Command:       rf.log[actualIndex].Command,
-			CommandIndex:  rf.lastApplied + 1,
-			SnapshotValid: false,
-			Snapshot:      nil,
-			SnapshotTerm:  0,
-			SnapshotIndex: 0,
-		}
-	}
-}
+//func (rf *Raft) checkApply() {
+//	if rf.commitIndex > rf.lastApplied {
+//		rf.lastApplied++
+//		actualIndex := rf.getActualIndex(rf.lastApplied)
+//		Debug(dClient, "S%v apply [%v] at [%v], log=%v", rf.me, rf.log[actualIndex].Command, rf.lastApplied+1, rf.log)
+//		msg := ApplyMsg{
+//			CommandValid:  true,
+//			Command:       rf.log[actualIndex].Command,
+//			CommandIndex:  rf.lastApplied + 1,
+//			SnapshotValid: len(rf.snapShot) > 0,
+//			Snapshot:      rf.snapShot,
+//			SnapshotTerm:  rf.lastIncludedTerm,
+//			SnapshotIndex: rf.lastIncludedIndex,
+//		}
+//		rf.release("checkApply")
+//		rf.applyCh <- msg
+//	}
+//}
 
 //
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.acquire("RequestVote")
+	defer rf.release("RequestVote")
 
 	// pre check.
 	rf.handleFutureTerm(args.Term)
@@ -376,8 +388,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.acquire("AppendEntries")
+	defer rf.release("AppendEntries")
 
 	reply.Term = rf.currentTerm
 	reply.Success = true
@@ -412,7 +424,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		appendEntries = args.NewEntries[i-args.PrevLogIndex:]
 	}
-	Debug(dLog, "S%v append log at %v from S%v: %v.", rf.me, args.PrevLogIndex+1, args.LeaderId, appendEntries)
+	if len(appendEntries) == 0 {
+		Debug(dLog, "S%v <- S%v heartbeat", rf.me, args.LeaderId)
+	} else {
+		Debug(dLog, "S%v append log at %v from S%v: %v.", rf.me, args.PrevLogIndex+1, args.LeaderId, appendEntries)
+	}
 	rf.log = append(rf.log, appendEntries...)
 	rf.persist()
 	if args.LeaderCommit > rf.commitIndex {
@@ -459,8 +475,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) {
 	reply := RequestVoteReply{}
 	ok := rf.peers[server].Call("Raft.RequestVote", args, &reply)
 	if ok {
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
+		rf.acquire("SendQuest")
+		defer rf.release("SendQuest")
 
 		rf.handleFutureTerm(reply.Term)
 		if reply.Term < rf.currentTerm {
@@ -507,11 +523,15 @@ func (rf *Raft) sendRequestToAllPeers() {
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 	reply := AppendEntriesReply{}
-	Debug(dLog2, "S%v send %v to %v.", rf.me, args.NewEntries, server)
+	if len(args.NewEntries) == 0 {
+		Debug(dLog2, "S%v -> S%v sends heartbeat", rf.me, server)
+	} else {
+		Debug(dLog2, "S%v -> S%v append %v.", rf.me, server, args.NewEntries)
+	}
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, &reply)
 	if ok {
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
+		rf.acquire("SendAppendEntries")
+		defer rf.release("SendAppendEntries")
 
 		if args.Term < rf.currentTerm {
 			return // drop when reply is old.
@@ -608,7 +628,8 @@ func (rf *Raft) sendAppendToAllPeers() {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	rf.mu.Lock()
+	rf.acquire("Start")
+	defer rf.release("Start")
 	isLeader := rf.currentState == LEADER
 	index := -1
 	term := -1
@@ -621,7 +642,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.currentTerm
 		isLeader = rf.currentState == LEADER
 	}
-	rf.mu.Unlock()
 
 	// Your code here (2B).
 
@@ -656,7 +676,7 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-		rf.mu.Lock()
+		rf.acquire("ticker")
 		if time.Now().Sub(rf.lastTimeHeartBeat) > rf.elapseTimeOut {
 			switch rf.currentState {
 			case FOLLOWER:
@@ -665,8 +685,24 @@ func (rf *Raft) ticker() {
 				rf.activateElection()
 			}
 		}
-		rf.checkApply()
-		rf.mu.Unlock()
+		if rf.commitIndex > rf.lastApplied {
+			rf.lastApplied++
+			actualIndex := rf.getActualIndex(rf.lastApplied)
+			Debug(dClient, "S%v apply [%v] at [%v], log=%v", rf.me, rf.log[actualIndex].Command, rf.lastApplied+1, rf.log)
+			msg := ApplyMsg{
+				CommandValid:  true,
+				Command:       rf.log[actualIndex].Command,
+				CommandIndex:  rf.lastApplied + 1,
+				SnapshotValid: len(rf.snapShot) > 0,
+				Snapshot:      rf.snapShot,
+				SnapshotTerm:  rf.lastIncludedTerm,
+				SnapshotIndex: rf.lastIncludedIndex,
+			}
+			rf.release("ticker")
+			rf.applyCh <- msg // blocking
+		} else {
+			rf.release("ticker")
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
 }
@@ -678,12 +714,11 @@ func (rf *Raft) beater() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-		rf.mu.Lock()
+		rf.acquire("beater")
 		if rf.currentState == LEADER {
-			Debug(dLeader, "S%v sends heartbeat", rf.me)
 			rf.sendAppendToAllPeers()
 		}
-		rf.mu.Unlock()
+		rf.release("beater")
 		time.Sleep(100 * time.Millisecond)
 	}
 }
@@ -720,7 +755,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
