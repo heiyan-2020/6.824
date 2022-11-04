@@ -63,6 +63,7 @@ const (
 type LogEntry struct {
 	Command interface{} // content of this entry
 	Term    int
+	Index   int
 }
 
 // A Go object implementing a single Raft peer.
@@ -90,6 +91,10 @@ type Raft struct {
 	lastApplied  int
 	nextIndex    []int
 	matchIndex   []int
+
+	snapShot          []byte
+	lastIncludedIndex int
+	lastIncludedTerm  int
 }
 
 // return currentTerm and whether this server
@@ -253,11 +258,24 @@ func (rf *Raft) stepTerm(newTerm int) {
 	rf.persist()
 }
 
+func (rf *Raft) getCompleteLogLength() int {
+	return rf.lastIncludedIndex + len(rf.log) + 1
+}
+
+func (rf *Raft) getActualIndex(logicIndex int) int {
+	res := logicIndex - rf.lastIncludedIndex - 1
+	if res < 0 {
+		Debug(dWarn, "S%v try to access negative index of log", rf.me)
+	}
+	return res
+}
+
 func (rf *Raft) becomeLeader() {
 	// lock should be held.
 	rf.currentState = LEADER
+	initialNextIndex := rf.getCompleteLogLength()
 	for i := 0; i < len(rf.peers); i += 1 {
-		rf.nextIndex[i] = len(rf.log)
+		rf.nextIndex[i] = initialNextIndex
 		rf.matchIndex[i] = -1
 	}
 	Debug(dLeader, "S%v becomes leader of Term:%v", rf.me, rf.currentTerm)
@@ -283,10 +301,12 @@ func (rf *Raft) activateElection() {
 func (rf *Raft) checkApply() {
 	for rf.commitIndex > rf.lastApplied {
 		rf.lastApplied++
-		//Debug(dClient, "S%v apply [%v] at [%v], log=%v", rf.me, rf.log[rf.lastApplied].Command, rf.lastApplied+1, rf.log)
+		println("ahaha")
+		actualIndex := rf.getActualIndex(rf.lastApplied)
+		Debug(dClient, "S%v apply [%v] at [%v], log=%v", rf.me, rf.log[actualIndex].Command, rf.lastApplied+1, rf.log)
 		rf.applyCh <- ApplyMsg{
 			CommandValid:  true,
-			Command:       rf.log[rf.lastApplied].Command,
+			Command:       rf.log[actualIndex].Command,
 			CommandIndex:  rf.lastApplied + 1,
 			SnapshotValid: false,
 			Snapshot:      nil,
@@ -332,19 +352,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = true
 	reply.XTerm = -1
 	reply.XIndex = -1
-	reply.XLen = len(rf.log)
+	reply.XLen = rf.getCompleteLogLength()
 	if args.Term < rf.currentTerm {
 		return
 	}
 	rf.handleFutureTerm(args.Term)
 	rf.resetTimer()
-	if args.PrevLogIndex >= len(rf.log) || (args.PrevLogIndex != -1 && args.PrevLogTerm != rf.log[args.PrevLogIndex].Term) {
+	if args.PrevLogIndex >= rf.getCompleteLogLength() || (args.PrevLogIndex != -1 && args.PrevLogTerm != rf.log[rf.getActualIndex(args.PrevLogIndex)].Term) {
 		reply.Success = false
 		/*	return more information for fast backing up	*/
-		if args.PrevLogIndex != -1 && args.PrevLogIndex < len(rf.log) {
-			reply.XTerm = rf.log[args.PrevLogIndex].Term
+		if args.PrevLogIndex != -1 && args.PrevLogIndex < rf.getCompleteLogLength() {
+			reply.XTerm = rf.log[rf.getActualIndex(args.PrevLogIndex)].Term
 			i := args.PrevLogIndex
-			for ; i >= 0 && rf.log[i].Term == reply.XTerm; i-- {
+			for ; i >= 0 && rf.log[rf.getActualIndex(i)].Term == reply.XTerm; i-- {
 			}
 			reply.XIndex = i
 			Debug(dInfo, "S%v <- S%v Append failed.\n", rf.me, args.LeaderId)
@@ -353,8 +373,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	lastNewIndex := args.PrevLogIndex + len(args.NewEntries)
 	appendEntries := args.NewEntries
-	for i := args.PrevLogIndex + 1; i < len(rf.log) && i-args.PrevLogIndex-1 < len(args.NewEntries); i += 1 {
-		if rf.log[i].Term != args.NewEntries[i-args.PrevLogIndex-1].Term {
+	for i := args.PrevLogIndex + 1; i < rf.getCompleteLogLength() && i-args.PrevLogIndex-1 < len(args.NewEntries); i += 1 {
+		if rf.log[rf.getActualIndex(i)].Term != args.NewEntries[i-args.PrevLogIndex-1].Term {
 			rf.log = rf.log[:i]
 			appendEntries = args.NewEntries[i-args.PrevLogIndex-1:]
 			break
@@ -434,13 +454,10 @@ func (rf *Raft) sendRequestToAllPeers() {
 	CopyPeers := make([]*labrpc.ClientEnd, len(rf.peers))
 	copy(CopyPeers, rf.peers)
 	copyTerm := rf.currentTerm
-	copyLastLogIndex := len(rf.log) - 1
+	copyLastLogIndex := rf.getCompleteLogLength() - 1
 	copyLastLogTerm := -1
 	if copyLastLogIndex != -1 {
-		copyLastLogTerm = rf.log[copyLastLogIndex].Term
-	}
-	if len(rf.log) > 0 {
-		copyLastLogTerm = rf.log[len(rf.log)-1].Term
+		copyLastLogTerm = rf.log[rf.getActualIndex(copyLastLogIndex)].Term
 	}
 
 	for i := 0; i < len(CopyPeers); i += 1 {
@@ -484,7 +501,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 						count++
 					}
 				}
-				if count >= len(rf.peers)/2 && rf.log[n].Term == rf.currentTerm {
+				if count >= len(rf.peers)/2 && rf.log[rf.getActualIndex(n)].Term == rf.currentTerm {
 					rf.commitIndex = n
 				}
 			}
@@ -492,10 +509,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 			/* take advantage of returned information */
 			if reply.XTerm == -1 {
 				rf.nextIndex[server] = reply.XLen
-
 			} else {
 				i := args.PrevLogIndex // i won't be -1 because PrevLogIndex == -1 will always return true.
-				for ; i >= 0 && rf.log[i].Term != reply.XTerm; i-- {
+				for ; i >= 0 && rf.log[rf.getActualIndex(i)].Term != reply.XTerm; i-- {
 				}
 				if i == -1 {
 					// XTerm is not in log.
@@ -527,7 +543,7 @@ func (rf *Raft) sendAppendToAllPeers() {
 			prevIndex := copyNextIndex[i] - 1
 			prevLogTerm := -1
 			if prevIndex != -1 {
-				prevLogTerm = copyEntries[prevIndex].Term
+				prevLogTerm = copyEntries[rf.getActualIndex(prevIndex)].Term
 			}
 			args := AppendEntriesArgs{
 				Term:         copyTerm,
@@ -538,7 +554,7 @@ func (rf *Raft) sendAppendToAllPeers() {
 				LeaderCommit: copyLeaderCommit,
 			}
 			if len(copyEntries) > copyNextIndex[i] {
-				args.NewEntries = copyEntries[copyNextIndex[i]:]
+				args.NewEntries = copyEntries[rf.getActualIndex(copyNextIndex[i]):]
 			}
 			go rf.sendAppendEntries(i, &args)
 		}
@@ -567,9 +583,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	//fmt.Printf("start: %v: term=%v, command=%v\n", rf.me, rf.currentTerm, command)
 	if isLeader {
-		rf.log = append(rf.log, LogEntry{command, rf.currentTerm})
+		index = rf.getCompleteLogLength()
+		Debug(dClient, "S%v receive [%v] at %v", rf.me, command, index)
+		rf.log = append(rf.log, LogEntry{command, rf.currentTerm, index})
 		rf.persist()
-		index = len(rf.log)
 		term = rf.currentTerm
 		isLeader = rf.currentState == LEADER
 	}
@@ -664,6 +681,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.commitIndex = -1
 	rf.lastApplied = -1
+	rf.lastIncludedIndex = -1
+	rf.lastIncludedTerm = -1
 	rf.applyCh = applyCh
 
 	Debug(dClient, "S%v starts", rf.me)
