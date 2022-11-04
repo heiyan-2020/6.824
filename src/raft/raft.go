@@ -301,7 +301,6 @@ func (rf *Raft) activateElection() {
 func (rf *Raft) checkApply() {
 	for rf.commitIndex > rf.lastApplied {
 		rf.lastApplied++
-		println("ahaha")
 		actualIndex := rf.getActualIndex(rf.lastApplied)
 		Debug(dClient, "S%v apply [%v] at [%v], log=%v", rf.me, rf.log[actualIndex].Command, rf.lastApplied+1, rf.log)
 		rf.applyCh <- ApplyMsg{
@@ -594,7 +593,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
 
-	return index, term, isLeader
+	return index + 1, term, isLeader
 }
 
 //
