@@ -125,6 +125,9 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
+	e.Encode(rf.snapShot)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
 	Debug(dPersist, "S%v persists", rf.me)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
@@ -146,14 +149,23 @@ func (rf *Raft) readPersist(data []byte) {
 	var term int
 	var voteFor int
 	var logs []LogEntry
+	var snapShot []byte
+	var lastIndex int
+	var lastTerm int
 	if d.Decode(&term) != nil ||
 		d.Decode(&voteFor) != nil ||
-		d.Decode(&logs) != nil {
+		d.Decode(&logs) != nil ||
+		d.Decode(&snapShot) != nil ||
+		d.Decode(&lastIndex) != nil ||
+		d.Decode(&lastTerm) != nil {
 		Debug(dWarn, "S%v Decode failed.", rf.me)
 	} else {
 		rf.currentTerm = term
 		rf.votedFor = voteFor
 		rf.log = logs
+		rf.snapShot = snapShot
+		rf.lastIncludedIndex = lastIndex
+		rf.lastIncludedTerm = lastTerm
 		Debug(dPersist, "S%v reads from persistent state, term=%v, voted=%v, log=%v.", rf.me, rf.currentTerm, rf.votedFor, rf.log)
 	}
 }
