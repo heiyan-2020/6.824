@@ -306,9 +306,16 @@ func (rf *Raft) getCompleteLogLength() int {
 func (rf *Raft) getActualIndex(logicIndex int) int {
 	res := logicIndex - rf.lastIncludedIndex - 1
 	if res < 0 {
-		Debug(dWarn, "S%v try to access negative index of log", rf.me)
+		Debug(dWarn, "S%v logicIndex=%v, lastIndex=%v", rf.me, logicIndex, rf.lastIncludedIndex)
 	}
 	return res
+}
+
+func (rf *Raft) getTerm(logicIndex int) int {
+	if logicIndex == rf.lastIncludedIndex {
+		return rf.lastIncludedTerm
+	}
+	return rf.log[rf.getActualIndex(logicIndex)].Term
 }
 
 func (rf *Raft) becomeLeader() {
@@ -401,13 +408,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.handleFutureTerm(args.Term)
 	rf.resetTimer()
-	if args.PrevLogIndex >= rf.getCompleteLogLength() || (args.PrevLogIndex != -1 && args.PrevLogTerm != rf.log[rf.getActualIndex(args.PrevLogIndex)].Term) {
+	if args.PrevLogIndex >= rf.getCompleteLogLength() || (args.PrevLogIndex != -1 && args.PrevLogTerm != rf.getTerm(args.PrevLogIndex)) {
 		reply.Success = false
 		/*	return more information for fast backing up	*/
 		if args.PrevLogIndex != -1 && args.PrevLogIndex < rf.getCompleteLogLength() {
-			reply.XTerm = rf.log[rf.getActualIndex(args.PrevLogIndex)].Term
+			reply.XTerm = rf.getTerm(args.PrevLogIndex)
 			i := args.PrevLogIndex
-			for ; i >= 0 && rf.log[rf.getActualIndex(i)].Term == reply.XTerm; i-- {
+			for ; i >= 0 && rf.getTerm(i) == reply.XTerm; i-- {
 			}
 			reply.XIndex = i
 			Debug(dInfo, "S%v <- S%v Append failed.\n", rf.me, args.LeaderId)
@@ -417,7 +424,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	lastNewIndex := args.PrevLogIndex + len(args.NewEntries)
 	appendEntries := args.NewEntries
 	for i := args.PrevLogIndex + 1; i < rf.getCompleteLogLength() && i-args.PrevLogIndex-1 < len(args.NewEntries); i += 1 {
-		if rf.log[rf.getActualIndex(i)].Term != args.NewEntries[i-args.PrevLogIndex-1].Term {
+		if rf.getTerm(i) != rf.getTerm(i-args.PrevLogIndex-1) {
 			rf.log = rf.log[:i]
 			appendEntries = args.NewEntries[i-args.PrevLogIndex-1:]
 			break
@@ -498,22 +505,19 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) {
 
 func (rf *Raft) sendRequestToAllPeers() {
 	// lock held
-	CopyPeers := make([]*labrpc.ClientEnd, len(rf.peers))
-	copy(CopyPeers, rf.peers)
-	copyTerm := rf.currentTerm
-	copyLastLogIndex := rf.getCompleteLogLength() - 1
-	copyLastLogTerm := -1
-	if copyLastLogIndex != -1 {
-		copyLastLogTerm = rf.log[rf.getActualIndex(copyLastLogIndex)].Term
+	lastLogIndex := rf.getCompleteLogLength() - 1
+	lastLogTerm := -1
+	if lastLogIndex != -1 {
+		lastLogTerm = rf.getTerm(lastLogIndex)
 	}
 
-	for i := 0; i < len(CopyPeers); i += 1 {
+	for i := 0; i < len(rf.peers); i += 1 {
 		if i != rf.me {
 			args := RequestVoteArgs{
-				Term:         copyTerm,
+				Term:         rf.currentTerm,
 				CandidateId:  rf.me,
-				LastLogIndex: copyLastLogIndex,
-				LastLogTerm:  copyLastLogTerm,
+				LastLogIndex: lastLogIndex,
+				LastLogTerm:  lastLogTerm,
 			}
 			go rf.sendRequestVote(i, &args)
 		}
@@ -552,7 +556,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 						count++
 					}
 				}
-				if count >= len(rf.peers)/2 && rf.log[rf.getActualIndex(n)].Term == rf.currentTerm {
+				if count >= len(rf.peers)/2 && rf.getTerm(n) == rf.currentTerm {
 					rf.commitIndex = n
 				}
 			}
@@ -562,7 +566,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 				rf.nextIndex[server] = reply.XLen
 			} else {
 				i := args.PrevLogIndex // i won't be -1 because PrevLogIndex == -1 will always return true.
-				for ; i >= 0 && rf.log[rf.getActualIndex(i)].Term != reply.XTerm; i-- {
+				for ; i >= 0 && rf.getTerm(i) != reply.XTerm; i-- {
 				}
 				if i == -1 {
 					// XTerm is not in log.
@@ -578,34 +582,24 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 
 func (rf *Raft) sendAppendToAllPeers() {
 	// lock held
-	copyPeer := make([]*labrpc.ClientEnd, len(rf.peers))
-	copy(copyPeer, rf.peers)
-	copyTerm := rf.currentTerm
-	copyEntries := make([]LogEntry, len(rf.log))
-	copy(copyEntries, rf.log)
-	copyLeaderCommit := rf.commitIndex
-	copyNextIndex := make([]int, len(rf.nextIndex))
-	copy(copyNextIndex, rf.nextIndex)
-	copyMatchIndex := make([]int, len(rf.matchIndex))
-	copy(copyMatchIndex, rf.matchIndex)
 
-	for i := 0; i < len(copyPeer); i += 1 {
+	for i := 0; i < len(rf.peers); i += 1 {
 		if i != rf.me {
-			prevIndex := copyNextIndex[i] - 1
+			prevIndex := rf.nextIndex[i] - 1
 			prevLogTerm := -1
 			if prevIndex != -1 {
-				prevLogTerm = copyEntries[rf.getActualIndex(prevIndex)].Term
+				prevLogTerm = rf.getTerm(prevIndex)
 			}
 			args := AppendEntriesArgs{
-				Term:         copyTerm,
+				Term:         rf.currentTerm,
 				LeaderId:     rf.me,
 				PrevLogIndex: prevIndex,
 				PrevLogTerm:  prevLogTerm,
 				NewEntries:   make([]LogEntry, 0),
-				LeaderCommit: copyLeaderCommit,
+				LeaderCommit: rf.commitIndex,
 			}
-			if len(copyEntries) > copyNextIndex[i] {
-				args.NewEntries = copyEntries[rf.getActualIndex(copyNextIndex[i]):]
+			if rf.getCompleteLogLength() > rf.nextIndex[i] {
+				args.NewEntries = rf.log[rf.getActualIndex(rf.nextIndex[i]):]
 			}
 			go rf.sendAppendEntries(i, &args)
 		}
@@ -640,7 +634,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.log = append(rf.log, LogEntry{command, rf.currentTerm, index})
 		rf.persist()
 		term = rf.currentTerm
-		isLeader = rf.currentState == LEADER
 	}
 
 	// Your code here (2B).
@@ -693,7 +686,7 @@ func (rf *Raft) ticker() {
 				CommandValid:  true,
 				Command:       rf.log[actualIndex].Command,
 				CommandIndex:  rf.lastApplied + 1,
-				SnapshotValid: len(rf.snapShot) > 0,
+				SnapshotValid: false,
 				Snapshot:      rf.snapShot,
 				SnapshotTerm:  rf.lastIncludedTerm,
 				SnapshotIndex: rf.lastIncludedIndex,
