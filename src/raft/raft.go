@@ -175,7 +175,27 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	// get actual index in advance to avoid overriding of lastIncludedIndex
+	actualIndex := rf.getActualIndex(index)
+
+	// install new snapShot
+	rf.snapShot = snapshot
+	rf.lastIncludedIndex = index
+	rf.lastIncludedTerm = rf.log[rf.getActualIndex(index)].Term
+	Debug(dSnap, "S%v has installed snapShot of [lastIndex=%v lastTerm=%v]", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm)
+
+	// trim log
+	if actualIndex == len(rf.log)-1 {
+		rf.log = make([]LogEntry, 0)
+	} else {
+		rf.log = rf.log[actualIndex+1:]
+	}
+
+	// persist
+	rf.persist()
 }
 
 //
