@@ -468,9 +468,9 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) {
 		rf.acquire("SendQuest")
 		defer rf.release("SendQuest")
 
-		//if args.Term < rf.currentTerm {
-		//	return // drop when reply is old.
-		//}
+		if args.Term < rf.currentTerm {
+			return // drop when reply is old.
+		}
 
 		rf.handleFutureTerm(reply.Term)
 		if reply.Term < rf.currentTerm {
@@ -608,6 +608,9 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapShotArgs) {
 		if args.Term < rf.currentTerm {
 			return
 		}
+
+		rf.handleFutureTerm(reply.Term)
+		
 	}
 }
 
