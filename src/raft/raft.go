@@ -190,6 +190,12 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 		}
 		rf.lastIncludedIndex = lastIncludedIndex
 		rf.lastIncludedTerm = lastIncludedTerm
+		if lastIncludedIndex > rf.commitIndex {
+			rf.commitIndex = lastIncludedIndex
+		}
+		if lastIncludedIndex > rf.lastApplied {
+			rf.lastApplied = lastIncludedIndex
+		}
 		Debug(dSnap, "S%v has installed snapshot with lastIndex=%v", rf.me, rf.lastIncludedIndex)
 		rf.persist()
 		return true
@@ -279,17 +285,17 @@ type InstallSnapshotReply struct {
 }
 
 // return true when candidate's log is more or equally up-to-date than self's.
-func compareLog(self []LogEntry, candidateLastTerm int, candidateLastIndex int) bool {
-	if len(self) == 0 {
+func (rf *Raft) compareLog(candidateLastTerm int, candidateLastIndex int) bool {
+	if rf.getCompleteLogLength() == 0 {
 		return true
 	} else if candidateLastIndex == -1 {
 		return false
 	}
 
-	selfLastTerm := self[len(self)-1].Term
+	selfLastTerm := rf.getTerm(rf.getCompleteLogLength() - 1)
 	if candidateLastTerm > selfLastTerm {
 		return true
-	} else if candidateLastTerm == selfLastTerm && candidateLastIndex >= len(self)-1 {
+	} else if candidateLastTerm == selfLastTerm && candidateLastIndex >= rf.getCompleteLogLength()-1 {
 		return true
 	}
 	return false
@@ -317,6 +323,7 @@ func (rf *Raft) handleFutureTerm(term int) bool {
 	if term > rf.currentTerm {
 		rf.stepTerm(term)
 		rf.currentState = FOLLOWER
+		Debug(dLeader, "S%v see future Term, become follower", rf.me)
 		return true
 	}
 	return false
@@ -413,12 +420,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term < rf.currentTerm {
 		return
 	}
-	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && compareLog(rf.log, args.LastLogTerm, args.LastLogIndex) {
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.compareLog(args.LastLogTerm, args.LastLogIndex) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.persist()
 		rf.resetTimer()
-		Debug(dTimer, "S%v reset timer for granting vote", rf.me)
+		Debug(dVote, "S%v -> S%v votes", rf.me, args.CandidateId)
 		return
 	}
 	return
@@ -455,14 +462,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	appendEntries := args.NewEntries
 	for i := args.PrevLogIndex + 1; i < rf.getCompleteLogLength() && i-args.PrevLogIndex-1 < len(args.NewEntries); i += 1 {
 		if rf.getTerm(i) != args.NewEntries[i-args.PrevLogIndex-1].Term {
-			rf.log = rf.log[:i]
+			rf.log = rf.log[:rf.getActualIndex(i)]
 			appendEntries = args.NewEntries[i-args.PrevLogIndex-1:]
 			break
 		}
 		appendEntries = args.NewEntries[i-args.PrevLogIndex:]
 	}
 	if len(appendEntries) == 0 {
-		Debug(dLog, "S%v <- S%v heartbeat", rf.me, args.LeaderId)
+		Debug(dHeart, "S%v <- S%v heartbeat", rf.me, args.LeaderId)
 	} else {
 		Debug(dLog, "S%v append log at %v from S%v: %v.", rf.me, args.PrevLogIndex+1, args.LeaderId, appendEntries)
 	}
@@ -616,7 +623,7 @@ func (rf *Raft) sendAppendToAllPeers() {
 					go rf.sendAppendEntries(i, &args)
 				} else {
 					// heartbeat
-					Debug(dLog2, "S%v -> S%v sends heartbeat", rf.me, i)
+					Debug(dHeart, "S%v -> S%v sends heartbeat", rf.me, i)
 					go rf.sendAppendEntries(i, &args)
 				}
 			}
@@ -657,9 +664,10 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapShotArgs, reply *InstallSnapsho
 	rf.handleFutureTerm(args.Term)
 	rf.resetTimer() // install snapShot is kinda heartbeat.
 
-	if args.LastIncludedTerm < rf.getCompleteLogLength() {
+	if args.LastIncludedIndex < rf.getCompleteLogLength() {
 		reply.Success = true
 		rf.release("InstallSnapshot")
+		Debug(dSnap, "S%v already installed snapshot with lastIndex=%v", rf.me, args.LastIncludedIndex)
 		return
 	}
 
@@ -673,6 +681,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapShotArgs, reply *InstallSnapsho
 		SnapshotTerm:  args.LastIncludedTerm,
 		SnapshotIndex: args.LastIncludedIndex + 1,
 	}
+	Debug(dSnap, "S%v is going to install snapshot with lastIndex=%v", rf.me, args.LastIncludedIndex)
 	rf.release("InstallSnapshot")
 	rf.applyCh <- msg // blocking API
 	return
