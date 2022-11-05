@@ -451,7 +451,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if args.PrevLogIndex != -1 && args.PrevLogIndex < rf.getCompleteLogLength() {
 			reply.XTerm = rf.getTerm(args.PrevLogIndex)
 			i := args.PrevLogIndex
-			for ; i >= 0 && rf.getTerm(i) == reply.XTerm; i-- {
+			for ; i > rf.lastIncludedIndex && rf.getTerm(i) == reply.XTerm; i-- {
 			}
 			reply.XIndex = i
 			Debug(dInfo, "S%v <- S%v Append failed.\n", rf.me, args.LeaderId)
@@ -573,9 +573,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 				rf.nextIndex[server] = reply.XLen
 			} else {
 				i := args.PrevLogIndex // i won't be -1 because PrevLogIndex == -1 will always return true.
-				for ; i >= 0 && rf.getTerm(i) != reply.XTerm; i-- {
+				for ; i > rf.lastIncludedIndex && rf.getTerm(i) != reply.XTerm; i-- {
 				}
-				if i == -1 {
+				if i == rf.lastIncludedIndex {
 					// XTerm is not in log.
 					rf.nextIndex[server] = reply.XIndex
 				} else {
