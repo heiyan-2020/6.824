@@ -436,7 +436,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	lastNewIndex := args.PrevLogIndex + len(args.NewEntries)
 	appendEntries := args.NewEntries
 	for i := args.PrevLogIndex + 1; i < rf.getCompleteLogLength() && i-args.PrevLogIndex-1 < len(args.NewEntries); i += 1 {
-		if rf.getTerm(i) != rf.getTerm(i-args.PrevLogIndex-1) {
+		if rf.getTerm(i) != args.NewEntries[i-args.PrevLogIndex-1].Term {
 			rf.log = rf.log[:i]
 			appendEntries = args.NewEntries[i-args.PrevLogIndex-1:]
 			break
@@ -582,8 +582,8 @@ func (rf *Raft) sendAppendToAllPeers() {
 			if rf.getCompleteLogLength() > rf.nextIndex[i] {
 				if rf.lastIncludedIndex < rf.nextIndex[i] {
 					// newEntries are all within existing log
-					Debug(dLog2, "S%v -> S%v append %v.", rf.me, i, args.NewEntries)
 					args.NewEntries = rf.log[rf.getActualIndex(rf.nextIndex[i]):]
+					Debug(dLog2, "S%v -> S%v append %v.", rf.me, i, args.NewEntries)
 					go rf.sendAppendEntries(i, &args)
 				} else {
 					// There are some newEntries laying within snapShot, call installSnapshot
