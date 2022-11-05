@@ -174,8 +174,26 @@ func (rf *Raft) readPersist(data []byte, snapShot []byte) {
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
+	rf.acquire("CondInstallSnapshot")
+	defer rf.release("CondInstallSnapshot")
+	lastIncludedIndex -= 1
 
-	return true
+	if rf.lastIncludedIndex > lastIncludedIndex {
+		// old snapshot, just discard
+		return false
+	} else {
+		rf.snapShot = snapshot
+		if lastIncludedIndex < rf.getCompleteLogLength()-1 {
+			rf.log = rf.log[rf.getActualIndex(lastIncludedIndex)+1:]
+		} else {
+			rf.log = make([]LogEntry, 0)
+		}
+		rf.lastIncludedIndex = lastIncludedIndex
+		rf.lastIncludedTerm = lastIncludedTerm
+		Debug(dSnap, "S%v has installed snapshot with lastIndex=%v", rf.me, rf.lastIncludedIndex)
+		rf.persist()
+		return true
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -195,7 +213,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.snapShot = snapshot
 	rf.lastIncludedIndex = index
 	rf.lastIncludedTerm = rf.log[actualIndex].Term
-	Debug(dSnap, "S%v has installed snapShot of [lastIndex=%v lastTerm=%v]", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm)
+	Debug(dSnap, "S%v has installed snapShot: lastIndex=%v lastTerm=%v", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm)
 
 	// trim log
 	if actualIndex == len(rf.log)-1 {
@@ -283,13 +301,13 @@ func (rf *Raft) resetTimer() {
 }
 
 func (rf *Raft) acquire(funcName string) {
-	//Debug(dLock, "S%v acquire lock from %v", rf.me, funcName)
+	Debug(dLock1, "S%v acquire lock from %v", rf.me, funcName)
 	rf.mu.Lock()
-	//Debug(dLock, "S%v acquired", rf.me)
+	Debug(dLock1, "S%v acquired", rf.me)
 }
 
 func (rf *Raft) release(funcName string) {
-	//Debug(dInfo, "S%v release lock from %v", rf.me, funcName)
+	Debug(dLock2, "S%v release lock from %v", rf.me, funcName)
 	rf.mu.Unlock()
 }
 
@@ -566,32 +584,41 @@ func (rf *Raft) sendAppendToAllPeers() {
 	// lock held
 	for i := 0; i < len(rf.peers); i += 1 {
 		if i != rf.me {
-			prevIndex := rf.nextIndex[i] - 1
-			prevLogTerm := -1
-			if prevIndex != -1 {
-				prevLogTerm = rf.getTerm(prevIndex)
-			}
-			args := AppendEntriesArgs{
-				Term:         rf.currentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: prevIndex,
-				PrevLogTerm:  prevLogTerm,
-				NewEntries:   make([]LogEntry, 0),
-				LeaderCommit: rf.commitIndex,
-			}
-			if rf.getCompleteLogLength() > rf.nextIndex[i] {
-				if rf.lastIncludedIndex < rf.nextIndex[i] {
+			if rf.lastIncludedIndex >= rf.nextIndex[i] {
+				// There are some newEntries laying within snapShot, call installSnapshot
+				snapArgs := InstallSnapShotArgs{
+					Term:              rf.currentTerm,
+					LeaderId:          rf.me,
+					LastIncludedIndex: rf.lastIncludedIndex,
+					LastIncludedTerm:  rf.lastIncludedTerm,
+					Data:              rf.snapShot,
+				}
+				Debug(dSnap, "S%v -> S%v install Snapshot with lastIndex=%v.", rf.me, i, rf.lastIncludedIndex)
+				go rf.sendInstallSnapshot(i, &snapArgs)
+			} else {
+				prevIndex := rf.nextIndex[i] - 1
+				prevLogTerm := -1
+				if prevIndex != -1 {
+					prevLogTerm = rf.getTerm(prevIndex)
+				}
+				args := AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: prevIndex,
+					PrevLogTerm:  prevLogTerm,
+					NewEntries:   make([]LogEntry, 0),
+					LeaderCommit: rf.commitIndex,
+				}
+				if rf.getCompleteLogLength() > rf.nextIndex[i] {
 					// newEntries are all within existing log
 					args.NewEntries = rf.log[rf.getActualIndex(rf.nextIndex[i]):]
 					Debug(dLog2, "S%v -> S%v append %v.", rf.me, i, args.NewEntries)
 					go rf.sendAppendEntries(i, &args)
 				} else {
-					// There are some newEntries laying within snapShot, call installSnapshot
+					// heartbeat
+					Debug(dLog2, "S%v -> S%v sends heartbeat", rf.me, i)
+					go rf.sendAppendEntries(i, &args)
 				}
-			} else {
-				// heartbeat
-				Debug(dLog2, "S%v -> S%v sends heartbeat", rf.me, i)
-				go rf.sendAppendEntries(i, &args)
 			}
 		}
 	}
@@ -610,36 +637,35 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapShotArgs) {
 		}
 
 		rf.handleFutureTerm(reply.Term)
-		
+		//rf.matchIndex[server] = args.LastIncludedIndex
+		//rf.nextIndex[server] = rf.matchIndex[server] + 1
 	}
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapShotArgs, reply *InstallSnapshotReply) {
 	rf.acquire("InstallSnapshot")
-	defer rf.release("InstallSnapshot")
 
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
+		rf.release("InstallSnapshot")
 		return
 	}
 	rf.handleFutureTerm(args.Term)
 	rf.resetTimer() // install snapShot is kinda heartbeat.
 
-	rf.snapShot = args.Data
-
-	if args.LastIncludedIndex > rf.lastIncludedIndex && args.LastIncludedIndex < rf.getCompleteLogLength()-1 {
-		rf.log = rf.log[rf.getActualIndex(args.LastIncludedIndex+1):]
-		rf.lastIncludedTerm = args.LastIncludedTerm
-		rf.lastIncludedIndex = args.LastIncludedIndex
-		return
-	}
-
-	rf.log = make([]LogEntry, 0)
-	rf.lastIncludedTerm = args.LastIncludedTerm
-	rf.lastIncludedIndex = args.LastIncludedIndex
-
 	// Send Snapshot to application.
-
+	msg := ApplyMsg{
+		CommandValid:  false,
+		Command:       nil,
+		CommandIndex:  0,
+		SnapshotValid: true,
+		Snapshot:      args.Data,
+		SnapshotTerm:  args.LastIncludedTerm,
+		SnapshotIndex: args.LastIncludedIndex + 1,
+	}
+	rf.release("InstallSnapshot")
+	rf.applyCh <- msg // blocking API
+	return
 }
 
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
@@ -688,7 +714,7 @@ func (rf *Raft) ticker() {
 		if rf.commitIndex > rf.lastApplied {
 			rf.lastApplied++
 			actualIndex := rf.getActualIndex(rf.lastApplied)
-			Debug(dClient, "S%v apply [%v] at [%v], log=%v", rf.me, rf.log[actualIndex].Command, rf.lastApplied+1, rf.log)
+			Debug(dClient, "S%v apply [%v] at [%v]", rf.me, rf.log[actualIndex].Command, rf.lastApplied+1)
 			msg := ApplyMsg{
 				CommandValid:  true,
 				Command:       rf.log[actualIndex].Command,
