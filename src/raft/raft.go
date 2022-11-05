@@ -163,6 +163,8 @@ func (rf *Raft) readPersist(data []byte, snapShot []byte) {
 		rf.snapShot = snapShot
 		rf.lastIncludedIndex = lastIndex
 		rf.lastIncludedTerm = lastTerm
+		rf.lastApplied = rf.lastIncludedIndex
+		rf.commitIndex = rf.lastIncludedIndex
 		Debug(dPersist, "S%v reads from persistent state, term=%v, voted=%v, log=%v.", rf.me, rf.currentTerm, rf.votedFor, rf.log)
 	}
 }
@@ -196,7 +198,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 		if lastIncludedIndex > rf.lastApplied {
 			rf.lastApplied = lastIncludedIndex
 		}
-		Debug(dSnap, "S%v has installed snapshot with lastIndex=%v", rf.me, rf.lastIncludedIndex)
+		Debug(dSnap, "S%v has installed snapshot with lastIndex=%v, (commit=%v, apply=%v)", rf.me, rf.lastIncludedIndex, rf.commitIndex, rf.lastApplied)
 		rf.persist()
 		return true
 	}
