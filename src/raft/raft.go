@@ -274,7 +274,8 @@ type AppendEntriesReply struct {
 }
 
 type InstallSnapshotReply struct {
-	Term int
+	Term    int
+	Success bool
 }
 
 // return true when candidate's log is more or equally up-to-date than self's.
@@ -416,7 +417,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.persist()
-		Debug(dPersist, "S%v persist when voting", rf.me)
 		rf.resetTimer()
 		Debug(dTimer, "S%v reset timer for granting vote", rf.me)
 		return
@@ -612,7 +612,7 @@ func (rf *Raft) sendAppendToAllPeers() {
 				if rf.getCompleteLogLength() > rf.nextIndex[i] {
 					// newEntries are all within existing log
 					args.NewEntries = rf.log[rf.getActualIndex(rf.nextIndex[i]):]
-					Debug(dLog2, "S%v -> S%v append %v.", rf.me, i, args.NewEntries)
+					Debug(dLog, "S%v -> S%v append %v.", rf.me, i, args.NewEntries)
 					go rf.sendAppendEntries(i, &args)
 				} else {
 					// heartbeat
@@ -637,8 +637,11 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapShotArgs) {
 		}
 
 		rf.handleFutureTerm(reply.Term)
-		//rf.matchIndex[server] = args.LastIncludedIndex
-		//rf.nextIndex[server] = rf.matchIndex[server] + 1
+
+		if reply.Success {
+			rf.matchIndex[server] = args.LastIncludedIndex
+			rf.nextIndex[server] = rf.matchIndex[server] + 1
+		}
 	}
 }
 
@@ -646,12 +649,19 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapShotArgs, reply *InstallSnapsho
 	rf.acquire("InstallSnapshot")
 
 	reply.Term = rf.currentTerm
+	reply.Success = false
 	if args.Term < rf.currentTerm {
 		rf.release("InstallSnapshot")
 		return
 	}
 	rf.handleFutureTerm(args.Term)
 	rf.resetTimer() // install snapShot is kinda heartbeat.
+
+	if args.LastIncludedTerm < rf.getCompleteLogLength() {
+		reply.Success = true
+		rf.release("InstallSnapshot")
+		return
+	}
 
 	// Send Snapshot to application.
 	msg := ApplyMsg{
